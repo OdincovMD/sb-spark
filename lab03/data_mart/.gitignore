@@ -1,0 +1,13 @@
+# sbt
+/target/
+/project/target/
+/project/project/
+/.metals/
+/.bloop/
+/.idea/
+/.vscode/
+/out/
+/.worksheet/
+project/.bloop
+project/metals.sbt
+.env
