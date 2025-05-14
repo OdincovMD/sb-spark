@@ -1,0 +1,12 @@
+**/target/
+**/project/
+**/.metals/
+**/.bloop/
+**/.idea/
+**/.vscode/
+**/.worksheet/
+**/out/
+**/.ipynb_checkpoints/
+**/.env
+**/metals.sbt
+**/.scala-build

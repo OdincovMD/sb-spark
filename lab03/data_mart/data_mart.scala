@@ -69,7 +69,6 @@ object Main {
     // Группируем данные по uid и category, чтобы подсчитать, сколько раз каждый пользователь просматривал товары в каждой категории.
     val shopCategoryCounts = visits
       .filter(col("uid").isNotNull)
-      .filter(col("event_type") === "view")
       .withColumn("category", lower(regexp_replace(col("category"), "[\\s-]+", "_")))
       .groupBy("uid", "category")
       .agg(count("*").alias("shop_count"))
