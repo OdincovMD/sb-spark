@@ -3,7 +3,6 @@ import org.apache.spark.sql.functions._
 import java.time.format.DateTimeFormatter
 import java.time.LocalDate
 import org.apache.hadoop.fs.{FileSystem, Path}
-import java.net.URI
 
 object users_items {
 
@@ -94,7 +93,7 @@ object users_items {
 
     // Получаем соответствующую файловую систему
     val conf = spark.sparkContext.hadoopConfiguration
-    val fs = FileSystem.get(new URI(normalizedInputDir), conf)
+    val fs = new Path(normalizedInputDir).getFileSystem(conf)
 
     val viewPath = s"$normalizedInputDir/view"
     val buyPath = s"$normalizedInputDir/buy"
