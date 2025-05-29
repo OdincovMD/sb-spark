@@ -3,6 +3,7 @@ import org.apache.spark.sql.functions._
 import java.time.format.DateTimeFormatter
 import java.time.LocalDate
 import org.apache.hadoop.fs.{FileSystem, Path}
+import java.net.URI
 
 object users_items {
 
@@ -57,41 +58,77 @@ object users_items {
     }
 
   def main(args: Array[String]): Unit = {
-    val spark = SparkSession.builder().getOrCreate()
+    val spark = SparkSession.builder()
+      .config("spark.hadoop.fs.defaultFS", "hdfs://spark-master-1.newprolab.com:8020")
+      .getOrCreate()
+    
     import spark.implicits._
 
     val updateMode = spark.conf.get("spark.users_items.update", "1").toInt
     val inputDir = spark.conf.get("spark.users_items.input_dir")
     val outputDir = spark.conf.get("spark.users_items.output_dir")
 
-    def normalizePath(path: String): String = {
-      if (path.contains("://")) path 
-      else if (path.startsWith("/")) s"file://$path"
-      else path
+    // Функция для определения типа файловой системы
+    def getFsType(path: String): String = {
+      if (path.startsWith("hdfs://")) "hdfs"
+      else if (path.startsWith("file://")) "local"
+      else "hdfs" // по умолчанию считаем HDFS
     }
 
-    val viewDF = readEvents(spark, s"$inputDir/view", "view")
-    val buyDF = readEvents(spark, s"$inputDir/buy", "buy")
+    // Функция для нормализации путей
+    def normalizePath(path: String): String = {
+      val fsType = getFsType(path)
+      
+      if (path.contains("://")) path 
+      else {
+        if (fsType == "hdfs") s"hdfs://spark-master-1.newprolab.com:8020$path"
+        else s"file://$path"
+      }
+    }
+
+    val normalizedInputDir = normalizePath(inputDir)
+    val normalizedOutputDir = normalizePath(outputDir)
+
+    println(s"Using input path: $normalizedInputDir")
+    println(s"Using output path: $normalizedOutputDir")
+
+    // Получаем соответствующую файловую систему
+    val conf = spark.sparkContext.hadoopConfiguration
+    val fs = FileSystem.get(new URI(normalizedInputDir), conf)
+
+    val viewPath = s"$normalizedInputDir/view"
+    val buyPath = s"$normalizedInputDir/buy"
+
+    // Проверка существования путей
+    if (!fs.exists(new Path(viewPath))) {
+      throw new RuntimeException(s"Input path does not exist: $viewPath")
+    }
+
+    val viewDF = readEvents(spark, viewPath, "view")
+    val buyDF = readEvents(spark, buyPath, "buy")
     val allDF = viewDF.union(buyDF)
 
     val inputPivoted = pivot(allDF)
     val dateStr = latestDate(spark, allDF)
-    val finalOutputPath = s"$outputDir/$dateStr"
+    val finalOutputPath = s"$normalizedOutputDir/$dateStr"
 
     val resultDF = if (updateMode == 0) {
       inputPivoted
     } else {
-      val previousDirOpt = latestOutputSubdir(spark, outputDir)
-      previousDirOpt match {
+      latestOutputSubdir(spark, normalizedOutputDir) match {
         case Some(prevDate) =>
-          val prevDF = spark.read.option("mergeSchema", "true").parquet(s"$normalizedOutputDir/$prevDate")
+          val prevPath = s"$normalizedOutputDir/$prevDate"
+          if (!fs.exists(new Path(prevPath))) {
+            throw new RuntimeException(s"Previous output path does not exist: $prevPath")
+          }
+          val prevDF = spark.read.parquet(prevPath)
           mergeMatrices(prevDF, inputPivoted)
-        case None =>
-          inputPivoted
+        case None => inputPivoted
       }
     }
 
+    // Записываем результат
     resultDF.write.mode("overwrite").parquet(finalOutputPath)
-    println(s"Матрица users-items записана в $finalOutputPath")
+    println(s"Successfully saved to: $finalOutputPath")
   }
 }
