@@ -10,11 +10,11 @@ object users_items {
     name.toLowerCase.replaceAll("[\\s\\-]+", "_")
 
   def readEvents(spark: SparkSession, path: String, prefix: String): DataFrame = {
-    import spark.implicits._
-    spark.read.parquet(path)
-      .select($"uid", $"item_id", $"date")
-      .withColumn("item_id", concat(lit(prefix + "_"), regexp_replace(lower($"item_id"), "[\\s\\-]+", "_")))
-  }
+      import spark.implicits._
+      spark.read.json(path)
+        .select($"uid", $"item_id", $"date")
+        .withColumn("item_id", concat(lit(prefix + "_"), regexp_replace(lower($"item_id"), "[\\s\\-]+", "_")))
+    }
 
   def pivot(df: DataFrame): DataFrame = {
     df.groupBy("uid")
@@ -23,7 +23,8 @@ object users_items {
       .na.fill(0)
   }
 
-  def latestDate(df: DataFrame): String = {
+  def latestDate(spark: SparkSession, df: DataFrame): String = {
+    import spark.implicits._
     val maxDate = df.agg(max(to_date($"date", "yyyyMMdd"))).as[java.sql.Date].head()
     val localDate = maxDate.toLocalDate
     localDate.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
@@ -39,16 +40,21 @@ object users_items {
   }
 
   def mergeMatrices(df1: DataFrame, df2: DataFrame): DataFrame = {
-    val allCols = (df1.columns ++ df2.columns).distinct
-    val filled1 = allCols.foldLeft(df1)((df, col) => if (df.columns.contains(col)) df else df.withColumn(col, lit(0)))
-    val filled2 = allCols.foldLeft(df2)((df, col) => if (df.columns.contains(col)) df else df.withColumn(col, lit(0)))
-
-    filled1.unionByName(filled2)
-      .groupBy("uid")
-      .agg(
-        allCols.filter(_ != "uid").map(c => sum(col(c)).alias(c)): _*
-      )
-  }
+      val allCols = (df1.columns ++ df2.columns).distinct
+      val filled1 = allCols.foldLeft(df1)((df, col) => 
+        if (df.columns.contains(col)) df else df.withColumn(col, lit(0)))
+      val filled2 = allCols.foldLeft(df2)((df, col) => 
+        if (df.columns.contains(col)) df else df.withColumn(col, lit(0)))
+    
+      // Создаем выражения для агрегации
+      val aggExprs = allCols
+        .filter(_ != "uid")
+        .map(c => sum(col(c)).alias(c))
+      
+      filled1.unionByName(filled2)
+        .groupBy("uid")
+        .agg(aggExprs.head, aggExprs.tail: _*)
+    }
 
   def main(args: Array[String]): Unit = {
     val spark = SparkSession.builder().getOrCreate()
@@ -63,7 +69,7 @@ object users_items {
     val allDF = viewDF.union(buyDF)
 
     val inputPivoted = pivot(allDF)
-    val dateStr = latestDate(allDF)
+    val dateStr = latestDate(spark, allDF)
     val finalOutputPath = s"$outputDir/$dateStr"
 
     val resultDF = if (updateMode == 0) {
