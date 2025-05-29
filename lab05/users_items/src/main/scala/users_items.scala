@@ -64,6 +64,12 @@ object users_items {
     val inputDir = spark.conf.get("spark.users_items.input_dir")
     val outputDir = spark.conf.get("spark.users_items.output_dir")
 
+    def normalizePath(path: String): String = {
+      if (path.contains("://")) path 
+      else if (path.startsWith("/")) s"file://$path"
+      else path
+    }
+
     val viewDF = readEvents(spark, s"$inputDir/view", "view")
     val buyDF = readEvents(spark, s"$inputDir/buy", "buy")
     val allDF = viewDF.union(buyDF)
@@ -78,7 +84,7 @@ object users_items {
       val previousDirOpt = latestOutputSubdir(spark, outputDir)
       previousDirOpt match {
         case Some(prevDate) =>
-          val prevDF = spark.read.option("mergeSchema", "true").parquet(s"$outputDir/$prevDate")
+          val prevDF = spark.read.option("mergeSchema", "true").parquet(s"$normalizedOutputDir/$prevDate")
           mergeMatrices(prevDF, inputPivoted)
         case None =>
           inputPivoted
