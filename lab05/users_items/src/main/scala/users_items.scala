@@ -56,87 +56,101 @@ object users_items {
         .groupBy("uid")
         .agg(aggExprs.head, aggExprs.tail: _*)
     }
-
   def main(args: Array[String]): Unit = {
-      val spark = SparkSession.builder()
-        .config("spark.hadoop.fs.defaultFS", "hdfs://spark-master-1.newprolab.com:8020")
-        .getOrCreate()
-    
-      import spark.implicits._
-    
-      val updateMode = spark.conf.get("spark.users_items.update", "1").toInt
-      val inputDirRaw = spark.conf.get("spark.users_items.input_dir")
-      val outputDirRaw = spark.conf.get("spark.users_items.output_dir")
-    
-      def isFileProtocol(path: String): Boolean = path.startsWith("file://") || path.startsWith("/")
-    
-      // Определим абсолютные пути
-      val inputPathPrefix =
-        if (isFileProtocol(inputDirRaw)) inputDirRaw.stripSuffix("/")
-        else s"hdfs://spark-master-1.newprolab.com:8020/$inputDirRaw".stripSuffix("/")
-    
-      val outputPathPrefix =
-        if (isFileProtocol(outputDirRaw)) outputDirRaw.stripSuffix("/")
-        else s"hdfs://spark-master-1.newprolab.com:8020/$outputDirRaw".stripSuffix("/")
-    
-      println(s"Using input path: $inputPathPrefix")
-      println(s"Using output path: $outputPathPrefix")
-    
-      val viewPath = s"$inputPathPrefix/view"
-      val buyPath = s"$inputPathPrefix/buy"
-    
-      // Получаем FS для input-а
-      val inputUri = new URI(viewPath)
-      val inputFs = FileSystem.get(inputUri, spark.sparkContext.hadoopConfiguration)
-    
-      if (!inputFs.exists(new Path(viewPath))) {
-        throw new RuntimeException(s"Input path does not exist: $viewPath")
-      }
-    
-      val viewDF = readEvents(spark, viewPath, "view")
-      val buyDF = readEvents(spark, buyPath, "buy")
-      val allDF = viewDF.union(buyDF)
-    
-      val inputPivoted = pivot(allDF)
-      val dateStr = latestDate(spark, allDF)
-      val fullOutputPath = s"$outputPathPrefix/$dateStr"
-    
-      // Очистим директорию, если нужно
-      try {
-        val outputUri = new URI(if (isFileProtocol(outputPathPrefix)) fullOutputPath else s"hdfs:///${fullOutputPath.stripPrefix("/")}")
-        val outputPath = new Path(outputUri)
-        val outputFs = FileSystem.get(outputUri, spark.sparkContext.hadoopConfiguration)
-    
-        if (outputFs.exists(outputPath)) {
-          outputFs.delete(outputPath, true)
-        }
-      } catch {
-        case e: Exception =>
-          println(s"Warning: failed to cleanup output path $fullOutputPath. Continuing. Exception: ${e.getMessage}")
-      }
-    
-      val resultDF = if (updateMode == 0) {
-        inputPivoted
-      } else {
-        latestOutputSubdir(spark, outputPathPrefix) match {
-          case Some(prevDate) =>
-            val prevPath = s"$outputPathPrefix/$prevDate"
-            val prevUri = new URI(prevPath)
-            val prevFs = FileSystem.get(prevUri, spark.sparkContext.hadoopConfiguration)
-    
-            if (!prevFs.exists(new Path(prevUri))) {
-              throw new RuntimeException(s"Previous output path does not exist: $prevPath")
-            }
-    
-            val prevDF = spark.read.parquet(prevPath)
-            mergeMatrices(prevDF, inputPivoted)
-          case None => inputPivoted
-        }
-      }
-    
-      // Сохраняем результат
-      resultDF.write.mode("overwrite").parquet(fullOutputPath)
-      println(s"Successfully saved to: $fullOutputPath")
+    val spark = SparkSession.builder()
+      .config("spark.hadoop.fs.defaultFS", "hdfs://spark-master-1.newprolab.com:8020")
+      .getOrCreate()
+
+    import spark.implicits._
+
+    val updateMode = spark.conf.get("spark.users_items.update", "1").toInt
+    val inputDirRaw = spark.conf.get("spark.users_items.input_dir")
+    val outputDirRaw = spark.conf.get("spark.users_items.output_dir")
+ 
+    def isFileProtocol(path: String): Boolean = path.startsWith("file://") || path.startsWith("/")
+
+    // Определим абсолютные пути
+    val inputPathPrefix =
+      if (isFileProtocol(inputDirRaw)) inputDirRaw.stripSuffix("/")
+      else s"hdfs://spark-master-1.newprolab.com:8020/$inputDirRaw".stripSuffix("/")
+
+    val outputPathPrefix =
+      if (isFileProtocol(outputDirRaw)) outputDirRaw.stripSuffix("/")
+      else s"hdfs://spark-master-1.newprolab.com:8020/$outputDirRaw".stripSuffix("/")
+
+    println(s"Using input path: $inputPathPrefix")
+    println(s"Using output path: $outputPathPrefix")
+
+    val viewPath = s"$inputPathPrefix/view"
+    val buyPath = s"$inputPathPrefix/buy"
+
+    // Получаем FS для input-а
+    val inputUri = new URI(viewPath)
+    val inputConf = spark.sparkContext.hadoopConfiguration
+    // Для локальных файлов используем RawLocalFileSystem
+    if (isFileProtocol(viewPath)) {
+      inputConf.set("fs.file.impl", classOf[org.apache.hadoop.fs.LocalFileSystem].getName)
+      inputConf.set("fs.defaultFS", "file:///")
+    }
+    val inputFs = FileSystem.get(inputUri, inputConf)
+ 
+    if (!inputFs.exists(new Path(viewPath))) {
+      throw new RuntimeException(s"Input path does not exist: $viewPath")
     }
 
+    val viewDF = readEvents(spark, viewPath, "view")
+    val buyDF = readEvents(spark, buyPath, "buy")
+    val allDF = viewDF.union(buyDF)
+
+    val inputPivoted = pivot(allDF)
+    val dateStr = latestDate(spark, allDF)
+    val fullOutputPath = s"$outputPathPrefix/$dateStr"
+
+    // Очистим директорию, если нужно
+    try {
+      val outputUri = new URI(fullOutputPath)
+      val outputConf = spark.sparkContext.hadoopConfiguration
+      // Для локальных файлов используем RawLocalFileSystem
+      if (isFileProtocol(fullOutputPath)) {
+        outputConf.set("fs.file.impl", classOf[org.apache.hadoop.fs.LocalFileSystem].getName)
+        outputConf.set("fs.defaultFS", "file:///")
+      }
+      val outputFs = FileSystem.get(outputUri, outputConf)
+      val outputPath = new Path(outputUri)
+
+      if (outputFs.exists(outputPath)) {
+        outputFs.delete(outputPath, true)
+      }
+    } catch {
+      case e: Exception =>
+      println(s"Warning: failed to cleanup output path $fullOutputPath. Continuing. Exception: ${e.getMessage}")
+    }
+    
+    val resultDF = if (updateMode == 0) {
+      inputPivoted
+    } else {
+      latestOutputSubdir(spark, outputPathPrefix) match {
+        case Some(prevDate) =>
+          val prevPath = s"$outputPathPrefix/$prevDate"
+          val prevUri = new URI(prevPath)
+          val prevConf = spark.sparkContext.hadoopConfiguration
+          if (isFileProtocol(prevPath)) {
+            prevConf.set("fs.file.impl", classOf[org.apache.hadoop.fs.LocalFileSystem].getName)
+            prevConf.set("fs.defaultFS", "file:///")
+          }
+          val prevFs = FileSystem.get(prevUri, prevConf)
+        
+          if (!prevFs.exists(new Path(prevUri))) {
+            throw new RuntimeException(s"Previous output path does not exist: $prevPath")
+          }
+
+          val prevDF = spark.read.parquet(prevPath)
+          mergeMatrices(prevDF, inputPivoted)
+        case None => inputPivoted
+      }
+    }
+    // Сохраняем результат
+    resultDF.write.mode("overwrite").parquet(fullOutputPath)
+    println(s"Successfully saved to: $fullOutputPath")
+  }
 }
