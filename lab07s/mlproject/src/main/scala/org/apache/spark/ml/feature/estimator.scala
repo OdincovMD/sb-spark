@@ -11,7 +11,9 @@ import java.io._
 import java.nio.file.{Files, Paths}
 import org.apache.spark.SparkFiles
 import scala.sys.process._
+import org.apache.spark.rdd.RDD
 
+// Класс для тренировки
 class SklearnEstimator(override val uid: String)
   extends Estimator[SklearnEstimatorModel] with DefaultParamsWritable {
 
@@ -20,13 +22,16 @@ class SklearnEstimator(override val uid: String)
   override def fit(dataset: Dataset[_]): SklearnEstimatorModel = {
     val spark = dataset.sparkSession
 
+    //  Преобразуем фичи в запись типа features=$domains\tlabel=$label
     val rdd = dataset.select("domains", "gender_age").rdd.map { row =>
       val domains = row.getAs[Seq[String]]("domains").mkString(" ")
       val label = row.getAs[String]("gender_age")
       s"features=$domains\tlabel=$label"
     }
 
-    val modelBase64 = rdd.pipe("train.py").collect().mkString("")
+    // Вызов train.py. Важно понимать, что фалй находится на экзекьюторах, не на драйвере + явное указание интерпретатора без шебанинга 
+    val modelBase64 = rdd.pipe(Seq("/opt/anaconda/envs/bd9/bin/python3", "./train.py")).collect().mkString("")
+
     new SklearnEstimatorModel(uid, modelBase64)
   }
 
@@ -41,33 +46,49 @@ object SklearnEstimator extends DefaultParamsReadable[SklearnEstimator] {
   override def load(path: String): SklearnEstimator = super.load(path)
 }
 
+// Класс для теста
 class SklearnEstimatorModel(override val uid: String, val model: String)
-  extends Model[SklearnEstimatorModel] with MLWritable {
+      extends Model[SklearnEstimatorModel] with MLWritable {
+    
+      override def transform(dataset: Dataset[_]): DataFrame = {
+          val spark = dataset.sparkSession
+          
+          import spark.implicits._
+        
+          val path = Files.createTempFile("lab07s", ".model")
+          Files.write(path, model.getBytes("UTF-8"))
+          spark.sparkContext.addFile(path.toString)
+        
+          val domainsRDD = dataset.select("domains").rdd.map(_.getAs[Seq[String]]("domains").mkString(" "))
+          val domainsWithIndex = domainsRDD.zipWithIndex().map { case (text, idx) => (idx, text) }
+        
+          if (domainsWithIndex.isEmpty()) {
+            dataset.withColumn("prediction", lit(null).cast(StringType))
+          } else {
+            val inputRDD: RDD[String] = domainsWithIndex.map(_._2)
+            val predictedRDD = inputRDD.pipe(Seq("/opt/anaconda/envs/bd9/bin/python3", "./test.py", "./" + path.getFileName.toString))
+              
+            val predictionsWithIndex = predictedRDD.zipWithIndex().map { case (pred, idx) => (idx, pred) }
+        
+            val predictionsDF = predictionsWithIndex.toDF("idx", "prediction")
+            val rddWithIndex: RDD[Row] = dataset.rdd.zipWithIndex().map {
+              case (row: Row, idx: Long) => Row.fromSeq(Seq(idx) ++ row.toSeq)
+            }
+            
+            val newSchema = StructType(
+              StructField("idx", LongType, nullable = false) +: dataset.schema.fields
+            )
+            
+            val originalDF = spark.createDataFrame(rddWithIndex, newSchema)
+        
+            val joined = originalDF
+              .join(predictionsDF, "idx")
+              .drop("idx")
+                    
+            joined
+          }
+        }
 
-  override def transform(dataset: Dataset[_]): DataFrame = {
-    val spark = dataset.sparkSession
-    val path = Files.createTempFile("lab07s", ".model")
-    try {
-      Files.write(path, model.getBytes("UTF-8"))
-      spark.sparkContext.addFile(path.toString)
-
-      val rdd = dataset.select("domains").rdd.map { row =>
-        row.getAs[Seq[String]]("domains").mkString(" ")
-      }
-
-      val predictions = rdd.pipe("test.py").collect()
-
-      import spark.implicits._
-      val predsDF = predictions.toSeq.toDF("prediction")
-        .withColumn("row_id", monotonically_increasing_id())
-
-      dataset.withColumn("row_id", monotonically_increasing_id())
-        .join(predsDF, "row_id")
-        .drop("row_id")
-    } finally {
-      Files.deleteIfExists(path)
-    }
-  }
 
   override def transformSchema(schema: StructType): StructType = {
     schema.add(StructField("prediction", StringType, nullable = false))

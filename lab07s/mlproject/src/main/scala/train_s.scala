@@ -7,6 +7,7 @@ import org.apache.spark.ml.feature.SklearnEstimator
 object train {
   def main(args: Array[String]): Unit = {
     val spark = SparkSession.builder().getOrCreate()
+    spark.sparkContext.addFile("python/train.py")
 
     // Считаем аргументы из spark.conf
     val trainPath = spark.conf.get("spark.train.data.path")

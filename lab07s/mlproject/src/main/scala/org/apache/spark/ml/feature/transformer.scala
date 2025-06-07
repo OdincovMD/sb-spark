@@ -14,8 +14,9 @@ class Url2DomainTransformer(override val uid: String)
   def this() = this(Identifiable.randomUID("Url2DomainTransformer"))
 
   override def transform(dataset: Dataset[_]): DataFrame = {
+    
     val spark = dataset.sparkSession
-    import spark.implicits._ 
+    import spark.implicits._
 
     val extractDomain = udf { (url: String) =>
       try {
@@ -29,21 +30,30 @@ class Url2DomainTransformer(override val uid: String)
 
     val withVisit = dataset.withColumn("visit", explode($"visits"))
     val withDomain = withVisit.withColumn("domain", extractDomain($"visit.url"))
-
-    withDomain
-      .groupBy($"uid", $"gender_age")
-      .agg(collect_list($"domain").alias("domains"))
-      .filter(size($"domains") > 0)
+    
+    // Для инференса не группируем по gender_age
+    val result = if (dataset.columns.contains("gender_age")) {
+      withDomain
+        .groupBy($"uid", $"gender_age")
+        .agg(collect_list($"domain").alias("domains"))
+        .filter(size($"domains") > 0)
+    } else {
+      withDomain
+        .groupBy($"uid")
+        .agg(collect_list($"domain").alias("domains"))
+        .filter(size($"domains") > 0)
+    }
+    result
   }
 
   override def copy(extra: ParamMap): Url2DomainTransformer = defaultCopy(extra)
 
   override def transformSchema(schema: StructType): StructType = {
     require(schema.fieldNames.contains("uid"), "Dataset must contain 'uid'")
-    require(schema.fieldNames.contains("gender_age"), "Dataset must contain 'gender_age'")
     require(schema.fieldNames.contains("visits"), "Dataset must contain 'visits'")
-    schema
-      .add("domains", ArrayType(StringType, containsNull = true), nullable = true)
+    
+    val newSchema = schema.add("domains", ArrayType(StringType, containsNull = true), nullable = true)
+    newSchema
   }
 }
 

@@ -1,29 +1,36 @@
-#!/opt/anaconda/envs/bd9/bin/python3
-
 import sys
 import pickle
 import base64
+import traceback
 
-# Загрузка модели
-with open("lab07.model", "r") as f:
-    model_string = f.read()
+def main():
+    try:
+        model_path = sys.argv[1]
 
-model_data = pickle.loads(base64.b64decode(model_string.encode("utf-8")))
-model = model_data["model"]
-vectorizer = model_data["vectorizer"]
+        # Читаем модель из файла (base64)
+        with open(model_path, "r") as f:
+            model_b64 = f.read()
 
-features = []
+        # Декодируем и загружаем сериализованную модель (Pipeline)
+        model = pickle.loads(base64.b64decode(model_b64.encode("utf-8")))
 
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    x_part = line.replace("features=", "")
-    features.append(x_part)
+        features = []
+        for line in sys.stdin:
+            line = line.strip()
+            features.append(line)
 
-X = vectorizer.transform(features)
-preds = model.predict(X)
+        if not features:
+            sys.exit(0)
 
-# Вывод предсказаний
-for pred in preds:
-    print(pred)
+        # model — это sklearn Pipeline, он умеет принимать raw текст и делать трансформацию + predict
+        preds = model.predict(features)
+
+        for pred in preds:
+            print(pred)
+
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(2)
+
+if __name__ == "__main__":
+    main()
